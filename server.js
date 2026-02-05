@@ -5,63 +5,30 @@ const cors = require('cors');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIO(server, { cors: { origin: "*" } });
+const io = socketIO(server, {
+    cors: { origin: "*" }, // Allow connections from anywhere (C# Client)
+    pingInterval: 10000,
+    pingTimeout: 5000
+});
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); 
 
+// Game State
 let players = new Map();
-let publishedGames = [
-    { name: "Boblox Baseplate", creator: "Frozy's Studio", plays: 120, likes: 5, favorites: 2, id: "baseplate" }
-];
 
-// --- API ENDPOINTS ---
-
-// 1. ROOT STATUS (Fixed "Cannot GET /")
+// --- STATUS PAGE ---
 app.get('/', (req, res) => {
     res.json({ 
         message: "Boblox Game Server Running", 
-        players: players.size,
-        uptime: process.uptime()
+        activePlayers: players.size 
     });
 });
 
-// 2. Get All Games
-app.get('/api/games', (req, res) => {
-    res.json(publishedGames);
-});
-
-// 3. Publish Game
-app.post('/api/publish', (req, res) => {
-    const { name, creator, data } = req.body;
-    const existing = publishedGames.find(g => g.name === name);
-    if (existing) {
-        existing.lastUpdated = new Date();
-        existing.data = data;
-    } else {
-        publishedGames.push({
-            name: name || "Untitled Game",
-            creator: creator || "Unknown",
-            plays: 0, likes: 0, favorites: 0,
-            id: Date.now().toString(),
-            data: data,
-            date: new Date()
-        });
-    }
-    res.json({ success: true, message: "Published!" });
-});
-
-// 4. Stats
-app.get('/api/players', (req, res) => { res.json({ count: players.size }); });
-app.get('/api/game/stats', (req, res) => {
-    const g = publishedGames[0];
-    res.json({ likes: g.likes, favorites: g.favorites, visits: g.plays });
-});
-
-// --- MULTIPLAYER ---
+// --- MULTIPLAYER LOGIC ---
 io.on('connection', (socket) => {
-    console.log(`User Connected: ${socket.id}`);
+    console.log(`Player Connected: ${socket.id}`);
 
+    // 1. Handle Join
     socket.on('join', (data) => {
         const player = {
             id: socket.id,
@@ -72,31 +39,56 @@ io.on('connection', (socket) => {
         };
         players.set(socket.id, player);
         
-        socket.emit('42', ["init", { playerId: socket.id, players: Array.from(players.values()) }]);
+        console.log(`${player.name} joined the game.`);
+
+        // Tell new player about existing players
+        socket.emit('42', ["init", { 
+            playerId: socket.id, 
+            players: Array.from(players.values()) 
+        }]);
+        
+        // Tell everyone else about new player
         socket.broadcast.emit('42', ["playerJoined", player]);
     });
 
+    // 2. Handle Movement
     socket.on('move', (data) => {
         const p = players.get(socket.id);
-        if(p) {
+        if (p) {
             p.position = data.position;
             p.rotation = data.rotation;
-            socket.broadcast.emit('42', ["playerMoved", { id: socket.id, position: p.position, rotation: p.rotation }]);
-        }
-    });
-    
-    socket.on('chat', (msg) => {
-        const p = players.get(socket.id);
-        if(p) {
-            io.emit('42', ["chatMessage", { playerId: socket.id, playerName: p.name, message: msg }]);
+            
+            // Broadcast to others
+            socket.broadcast.emit('42', ["playerMoved", { 
+                id: socket.id, 
+                position: p.position, 
+                rotation: p.rotation 
+            }]);
         }
     });
 
+    // 3. Handle Chat
+    socket.on('chat', (msg) => {
+        const p = players.get(socket.id);
+        if (p) {
+            console.log(`Chat from ${p.name}: ${msg}`);
+            io.emit('42', ["chatMessage", {
+                playerId: socket.id,
+                playerName: p.name,
+                message: msg
+            }]);
+        }
+    });
+
+    // 4. Handle Disconnect
     socket.on('disconnect', () => {
-        players.delete(socket.id);
-        io.emit('42', ["playerLeft", socket.id]);
+        if (players.has(socket.id)) {
+            console.log(`Player Left: ${socket.id}`);
+            players.delete(socket.id);
+            io.emit('42', ["playerLeft", socket.id]);
+        }
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on ${PORT}`));
+server.listen(PORT, () => console.log(`GAME SERVER running on port ${PORT}`));
