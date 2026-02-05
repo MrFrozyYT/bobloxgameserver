@@ -2,153 +2,126 @@ const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
 const cors = require('cors');
-const https = require('https'); // Required for the self-ping logic
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIO(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
-});
+const io = socketIO(server, { cors: { origin: "*" } });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // Allow big game files
 
-// --- GAME STATE ---
-const players = new Map();
-const chatMessages = [];
+// --- STORAGE ---
+// In a real app, use a database (MongoDB). For now, we keep it in memory.
+let players = new Map();
+let publishedGames = [
+    { name: "Boblox Baseplate", creator: "Frozy's Studio", plays: 120, id: "baseplate", likes: 5, favorites: 2 }
+];
 
-// --- ENDPOINTS ---
+// --- API ENDPOINTS ---
 
-// Health check endpoint for Render.com
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        players: players.size,
-        uptime: process.uptime()
-    });
+// 1. Get All Games (For the website to list them)
+app.get('/api/games', (req, res) => {
+    res.json(publishedGames);
 });
 
-app.get('/', (req, res) => {
-    res.json({ 
-        message: 'Boblox Game Server Running',
-        players: players.size 
-    });
+// 2. Publish Game (For C# Client)
+app.post('/api/publish', (req, res) => {
+    const { name, creator, data } = req.body;
+    
+    // Check if game exists to update it, or create new
+    const existing = publishedGames.find(g => g.name === name);
+    if (existing) {
+        existing.lastUpdated = new Date();
+        existing.data = data; // Update the save file
+        console.log(`Game Updated: ${name}`);
+    } else {
+        publishedGames.push({
+            name: name || "Untitled Game",
+            creator: creator || "Unknown",
+            plays: 0,
+            likes: 0,
+            favorites: 0,
+            id: Date.now().toString(),
+            data: data, // The string of parts/scripts
+            date: new Date()
+        });
+        console.log(`New Game Published: ${name}`);
+    }
+    
+    res.json({ success: true, message: "Game Published Successfully!" });
 });
 
-// --- SELF-PING LOGIC TO KEEP RENDER ALIVE ---
-// Replace this with your actual Render URL once you deploy
-const RENDER_EXTERNAL_URL = `https://your-app-name.onrender.com`; 
+// 3. Stats Endpoints (For website counters)
+app.get('/api/players', (req, res) => {
+    res.json({ count: players.size });
+});
 
-function keepAlive() {
-    console.log("Sending self-ping to keep server awake...");
-    https.get(`${RENDER_EXTERNAL_URL}/health`, (res) => {
-        console.log(`Self-ping status: ${res.statusCode}`);
-    }).on('error', (err) => {
-        console.error(`Self-ping failed: ${err.message}`);
-    });
-}
+app.get('/api/game/stats', (req, res) => {
+    // Just returning dummy stats for the "Featured" game
+    const g = publishedGames[0];
+    res.json({ likes: g.likes, favorites: g.favorites, visits: g.plays });
+});
 
-// Ping every 10 minutes (600,000 milliseconds)
-if (process.env.NODE_ENV === 'production') {
-    setInterval(keepAlive, 600000);
-}
-
-// --- SOCKET.IO LOGIC ---
+// --- MULTIPLAYER LOGIC ---
 io.on('connection', (socket) => {
-    console.log(`Player connected: ${socket.id}`);
+    console.log(`Socket Connected: ${socket.id}`);
 
     socket.on('join', (data) => {
+        // Create the player data from what the C# client sent
         const player = {
             id: socket.id,
-            name: data.name || `Player${Math.floor(Math.random() * 1000)}`,
-            position: { x: 0, y: 10, z: 0 },
-            rotation: 0,
-            health: 100,
-            color: data.color || { r: 255, g: 255, b: 0 }
+            name: data.name || "Guest",
+            color: data.color || { r:0, g:0, b:255 },
+            position: { x: 0, y: 5, z: 0 },
+            rotation: 0
         };
-
         players.set(socket.id, player);
-        socket.emit('init', {
-            playerId: socket.id,
-            players: Array.from(players.values())
-        });
-        socket.broadcast.emit('playerJoined', player);
-        console.log(`${player.name} joined the game`);
+        
+        console.log(`${player.name} joined!`);
+
+        // 1. Send INIT to the new player (tell them about existing players)
+        // We convert the Map values to an Array
+        socket.emit('42', ["init", { 
+            playerId: socket.id, 
+            players: Array.from(players.values()) 
+        }]);
+        
+        // 2. Send PLAYERJOINED to everyone else (tell them about the new player)
+        socket.broadcast.emit('42', ["playerJoined", player]);
     });
 
     socket.on('move', (data) => {
-        const player = players.get(socket.id);
-        if (player) {
-            player.position = data.position;
-            player.rotation = data.rotation;
-            socket.broadcast.emit('playerMoved', {
-                id: socket.id,
-                position: data.position,
-                rotation: data.rotation
-            });
+        const p = players.get(socket.id);
+        if(p) {
+            p.position = data.position;
+            p.rotation = data.rotation;
+            
+            // Broadcast move to everyone else
+            socket.broadcast.emit('42', ["playerMoved", { 
+                id: socket.id, 
+                position: p.position, 
+                rotation: p.rotation 
+            }]);
         }
     });
-
-    socket.on('chat', (message) => {
-        const player = players.get(socket.id);
-        if (player && message && message.trim().length > 0) {
-            const chatMsg = {
+    
+    socket.on('chat', (msg) => {
+        const p = players.get(socket.id);
+        if(p) {
+            io.emit('42', ["chatMessage", {
                 playerId: socket.id,
-                playerName: player.name,
-                message: message.trim(),
-                timestamp: Date.now()
-            };
-            chatMessages.push(chatMsg);
-            if (chatMessages.length > 100) chatMessages.shift();
-            io.emit('chatMessage', chatMsg);
-        }
-    });
-
-    socket.on('damage', (data) => {
-        const player = players.get(socket.id);
-        if (player) {
-            player.health = Math.max(0, player.health - data.amount);
-            io.emit('playerHealth', { id: socket.id, health: player.health });
-
-            if (player.health <= 0) {
-                setTimeout(() => {
-                    player.health = 100;
-                    player.position = { x: 0, y: 10, z: 0 };
-                    io.emit('playerRespawn', {
-                        id: socket.id,
-                        position: player.position,
-                        health: player.health
-                    });
-                }, 3000);
-            }
+                playerName: p.name,
+                message: msg
+            }]);
         }
     });
 
     socket.on('disconnect', () => {
-        const player = players.get(socket.id);
-        if (player) {
-            players.delete(socket.id);
-            socket.broadcast.emit('playerLeft', socket.id);
-        }
+        players.delete(socket.id);
+        io.emit('42', ["playerLeft", socket.id]);
+        console.log(`Socket Disconnected: ${socket.id}`);
     });
 });
 
-// --- SERVER START ---
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`🎮 Boblox Game Server running on port ${PORT}`);
-    
-    // Start pinging immediately if production
-    if (process.env.NODE_ENV === 'production') {
-        keepAlive();
-    }
-});
-
-process.on('SIGTERM', () => {
-    server.close(() => {
-        process.exit(0);
-    });
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
