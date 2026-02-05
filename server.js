@@ -13,7 +13,7 @@ const io = socketIO(server, {
 
 app.use(cors());
 
-// Store players in an Object for easy lookup
+// Store players
 let players = {}; 
 
 app.get('/', (req, res) => {
@@ -28,7 +28,6 @@ io.on('connection', (socket) => {
 
     // Handle Join
     socket.on('join', (data) => {
-        // Create player object
         const newPlayer = {
             id: socket.id,
             name: data.name || "Guest",
@@ -37,34 +36,31 @@ io.on('connection', (socket) => {
             rotation: 0
         };
 
-        // Add to global list
         players[socket.id] = newPlayer;
-        
         console.log(`${newPlayer.name} joined. Total: ${Object.keys(players).length}`);
 
-        // 1. Send ALL EXISTING PLAYERS to the NEW player ("init")
-        // Convert object to array
-        const playerList = Object.values(players);
-        socket.emit('42', ["init", { players: playerList }]);
+        // --- FIX: USE STANDARD EMIT (Library adds '42' automatically) ---
         
-        // 2. Send NEW PLAYER to EVERYONE ELSE ("playerJoined")
-        socket.broadcast.emit('42', ["playerJoined", newPlayer]);
+        // 1. Send ALL players to the NEW guy
+        socket.emit('init', { players: Object.values(players) });
+        
+        // 2. Send NEW guy to EVERYONE else
+        socket.broadcast.emit('playerJoined', newPlayer);
     });
 
     // Handle Movement
     socket.on('move', (data) => {
         const p = players[socket.id];
         if (p) {
-            // Update server state
             p.position = data.position;
             p.rotation = data.rotation;
             
-            // Broadcast to others (excluding sender)
-            socket.broadcast.emit('42', ["playerMoved", { 
+            // Broadcast to others
+            socket.broadcast.emit('playerMoved', { 
                 id: socket.id, 
                 position: p.position, 
                 rotation: p.rotation 
-            }]);
+            });
         }
     });
 
@@ -73,11 +69,11 @@ io.on('connection', (socket) => {
         const p = players[socket.id];
         if (p) {
             console.log(`[Chat] ${p.name}: ${msg}`);
-            io.emit('42', ["chatMessage", {
+            io.emit('chatMessage', {
                 playerId: socket.id,
                 playerName: p.name,
                 message: msg
-            }]);
+            });
         }
     });
 
@@ -86,9 +82,7 @@ io.on('connection', (socket) => {
         if (players[socket.id]) {
             console.log(`Player Left: ${players[socket.id].name}`);
             delete players[socket.id];
-            
-            // Tell everyone to remove this player
-            io.emit('42', ["playerLeft", socket.id]);
+            io.emit('playerLeft', socket.id);
         }
     });
 });
