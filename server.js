@@ -7,58 +7,91 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIO(server, {
     cors: { origin: "*" },
-    pingInterval: 10000,
+    pingInterval: 2000, 
     pingTimeout: 5000
 });
 
 app.use(cors());
 
-let players = new Map();
+// Store players in an Object for easy lookup
+let players = {}; 
 
 app.get('/', (req, res) => {
-    res.json({ message: "Boblox Game Server Running", players: players.size });
+    res.json({ 
+        message: "Boblox Game Server Running", 
+        players: Object.keys(players).length 
+    });
 });
 
 io.on('connection', (socket) => {
     console.log(`Player Connected: ${socket.id}`);
 
+    // Handle Join
     socket.on('join', (data) => {
-        const player = {
+        // Create player object
+        const newPlayer = {
             id: socket.id,
             name: data.name || "Guest",
             color: data.color || { r:0, g:0, b:255 },
             position: { x: 0, y: 5, z: 0 },
             rotation: 0
         };
-        players.set(socket.id, player);
+
+        // Add to global list
+        players[socket.id] = newPlayer;
         
-        // Send existing players to new guy
-        socket.emit('42', ["init", { playerId: socket.id, players: Array.from(players.values()) }]);
+        console.log(`${newPlayer.name} joined. Total: ${Object.keys(players).length}`);
+
+        // 1. Send ALL EXISTING PLAYERS to the NEW player ("init")
+        // Convert object to array
+        const playerList = Object.values(players);
+        socket.emit('42', ["init", { players: playerList }]);
         
-        // Send new guy to everyone else
-        socket.broadcast.emit('42', ["playerJoined", player]);
+        // 2. Send NEW PLAYER to EVERYONE ELSE ("playerJoined")
+        socket.broadcast.emit('42', ["playerJoined", newPlayer]);
     });
 
+    // Handle Movement
     socket.on('move', (data) => {
-        const p = players.get(socket.id);
+        const p = players[socket.id];
         if (p) {
+            // Update server state
             p.position = data.position;
             p.rotation = data.rotation;
-            socket.broadcast.emit('42', ["playerMoved", { id: socket.id, position: p.position, rotation: p.rotation }]);
+            
+            // Broadcast to others (excluding sender)
+            socket.broadcast.emit('42', ["playerMoved", { 
+                id: socket.id, 
+                position: p.position, 
+                rotation: p.rotation 
+            }]);
         }
     });
 
+    // Handle Chat
     socket.on('chat', (msg) => {
-        const p = players.get(socket.id);
-        if(p) io.emit('42', ["chatMessage", { playerId: socket.id, playerName: p.name, message: msg }]);
+        const p = players[socket.id];
+        if (p) {
+            console.log(`[Chat] ${p.name}: ${msg}`);
+            io.emit('42', ["chatMessage", {
+                playerId: socket.id,
+                playerName: p.name,
+                message: msg
+            }]);
+        }
     });
 
+    // Handle Disconnect
     socket.on('disconnect', () => {
-        players.delete(socket.id);
-        io.emit('42', ["playerLeft", socket.id]);
-        console.log(`Player Left: ${socket.id}`);
+        if (players[socket.id]) {
+            console.log(`Player Left: ${players[socket.id].name}`);
+            delete players[socket.id];
+            
+            // Tell everyone to remove this player
+            io.emit('42', ["playerLeft", socket.id]);
+        }
     });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Game Server on ${PORT}`));
+server.listen(PORT, () => console.log(`Game Server running on port ${PORT}`));
