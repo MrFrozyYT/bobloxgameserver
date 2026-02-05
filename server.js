@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
 const cors = require('cors');
+const https = require('https'); // Required for the self-ping logic
 
 const app = express();
 const server = http.createServer(app);
@@ -15,9 +16,11 @@ const io = socketIO(server, {
 app.use(cors());
 app.use(express.json());
 
-// Game state
+// --- GAME STATE ---
 const players = new Map();
 const chatMessages = [];
+
+// --- ENDPOINTS ---
 
 // Health check endpoint for Render.com
 app.get('/health', (req, res) => {
@@ -35,10 +38,28 @@ app.get('/', (req, res) => {
     });
 });
 
+// --- SELF-PING LOGIC TO KEEP RENDER ALIVE ---
+// Replace this with your actual Render URL once you deploy
+const RENDER_EXTERNAL_URL = `https://your-app-name.onrender.com`; 
+
+function keepAlive() {
+    console.log("Sending self-ping to keep server awake...");
+    https.get(`${RENDER_EXTERNAL_URL}/health`, (res) => {
+        console.log(`Self-ping status: ${res.statusCode}`);
+    }).on('error', (err) => {
+        console.error(`Self-ping failed: ${err.message}`);
+    });
+}
+
+// Ping every 10 minutes (600,000 milliseconds)
+if (process.env.NODE_ENV === 'production') {
+    setInterval(keepAlive, 600000);
+}
+
+// --- SOCKET.IO LOGIC ---
 io.on('connection', (socket) => {
     console.log(`Player connected: ${socket.id}`);
 
-    // Player joins
     socket.on('join', (data) => {
         const player = {
             id: socket.id,
@@ -50,27 +71,19 @@ io.on('connection', (socket) => {
         };
 
         players.set(socket.id, player);
-        
-        // Send current players to new player
         socket.emit('init', {
             playerId: socket.id,
             players: Array.from(players.values())
         });
-
-        // Notify others about new player
         socket.broadcast.emit('playerJoined', player);
-        
         console.log(`${player.name} joined the game`);
     });
 
-    // Player position update
     socket.on('move', (data) => {
         const player = players.get(socket.id);
         if (player) {
             player.position = data.position;
             player.rotation = data.rotation;
-            
-            // Broadcast to other players
             socket.broadcast.emit('playerMoved', {
                 id: socket.id,
                 position: data.position,
@@ -79,7 +92,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Chat message
     socket.on('chat', (message) => {
         const player = players.get(socket.id);
         if (player && message && message.trim().length > 0) {
@@ -89,35 +101,19 @@ io.on('connection', (socket) => {
                 message: message.trim(),
                 timestamp: Date.now()
             };
-            
             chatMessages.push(chatMsg);
-            
-            // Keep only last 100 messages
-            if (chatMessages.length > 100) {
-                chatMessages.shift();
-            }
-            
-            // Broadcast to all players
+            if (chatMessages.length > 100) chatMessages.shift();
             io.emit('chatMessage', chatMsg);
-            
-            console.log(`[CHAT] ${player.name}: ${message}`);
         }
     });
 
-    // Player takes damage
     socket.on('damage', (data) => {
         const player = players.get(socket.id);
         if (player) {
             player.health = Math.max(0, player.health - data.amount);
-            
-            io.emit('playerHealth', {
-                id: socket.id,
-                health: player.health
-            });
+            io.emit('playerHealth', { id: socket.id, health: player.health });
 
             if (player.health <= 0) {
-                console.log(`${player.name} died`);
-                // Respawn after 3 seconds
                 setTimeout(() => {
                     player.health = 100;
                     player.position = { x: 0, y: 10, z: 0 };
@@ -131,30 +127,28 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Player disconnects
     socket.on('disconnect', () => {
         const player = players.get(socket.id);
         if (player) {
-            console.log(`${player.name} disconnected`);
             players.delete(socket.id);
-            
-            // Notify others
             socket.broadcast.emit('playerLeft', socket.id);
         }
     });
 });
 
+// --- SERVER START ---
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🎮 Boblox Game Server running on port ${PORT}`);
-    console.log(`📡 WebSocket server ready`);
+    
+    // Start pinging immediately if production
+    if (process.env.NODE_ENV === 'production') {
+        keepAlive();
+    }
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
-    console.log('SIGTERM received, closing server...');
     server.close(() => {
-        console.log('Server closed');
         process.exit(0);
     });
 });
