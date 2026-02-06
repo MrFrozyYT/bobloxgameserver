@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const https = require('https'); // Added https for self-pinging
 const socketIO = require('socket.io');
 const cors = require('cors');
 
@@ -39,8 +40,6 @@ io.on('connection', (socket) => {
         players[socket.id] = newPlayer;
         console.log(`${newPlayer.name} joined. Total: ${Object.keys(players).length}`);
 
-        // --- FIX: USE STANDARD EMIT (Library adds '42' automatically) ---
-        
         // 1. Send ALL players to the NEW guy
         socket.emit('init', { players: Object.values(players) });
         
@@ -88,4 +87,21 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Game Server running on port ${PORT}`));
+server.listen(PORT, () => {
+    console.log(`Game Server running on port ${PORT}`);
+    
+    // --- KEEP ALIVE LOGIC ---
+    // Pings the server every 10 minutes (600,000 ms) to prevent sleep
+    const interval = 10 * 60 * 1000; 
+    const url = process.env.RENDER_EXTERNAL_URL || 'https://bobloxserver.onrender.com';
+
+    console.log(`Keep-Alive enabled. Pinging ${url} every 10 minutes.`);
+
+    setInterval(() => {
+        https.get(url, (res) => {
+            console.log(`[Keep-Alive] Ping sent to ${url}. Status: ${res.statusCode}`);
+        }).on('error', (e) => {
+            console.error(`[Keep-Alive] Ping failed: ${e.message}`);
+        });
+    }, interval);
+});
